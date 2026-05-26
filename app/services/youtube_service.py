@@ -389,95 +389,14 @@ class YouTubeService:
                 "preferredcodec": "m4a",
             })
 
-        last_progress_time = [0.0]
-
-        def _progress_hook(d: dict):
-            if on_progress is None:
-                return
-            now = time.monotonic()
-            # Throttle progress callbacks to every 1.5 seconds to avoid Telegram flood
-            if now - last_progress_time < 1.5 and d.get("status") == "downloading":
-                return
-            last_progress_time = now
-
-            status = d.get("status", "unknown")
-            downloaded = d.get("downloaded_bytes", 0)
-            total = d.get("total_bytes") or d.get("total_bytes_estimate")
-            speed = d.get("speed")
-            eta = d.get("eta")
-
-            pct = 0.0
-            if total and total > 0:
-                pct = min(100.0, downloaded / total * 100)
-
-            prog = DownloadProgress(
-                status=status,
-                pct=pct,
-                speed=speed,
-                eta=eta,
-                downloaded=downloaded,
-                total=total,
-            )
-
-            # Run the async callback in a thread-safe way
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    asyncio.run_coroutine_threadsafe(
-                        self._call_progress(on_progress, prog), loop
-                    )
-            except Exception:
-                pass
-
-        opts = {
-            **_ydl_opts_base(quiet=True),
-            "format": format_spec,
-            "outtmpl": out_template,
-            "postprocessors": postprocessors,
-            "progress_hooks": [_progress_hook],
-            "noplaylist": True,
-            "merge_output_format": ext if ext in ("mp4", "webm", "mkv") else None,
-        }
-
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
-
-        # Find the downloaded file
-        for f in settings.TMP_DIR.iterdir():
-            if f.stem == job_id:
-                logger.info(f"Downloaded: {f.name} ({f.stat().st_size // 1024} KB)")
-                return f
-
-        raise FileNotFoundError(f"Download finished but output file not found (job: {job_id})")
-
-    @staticmethod
-    async def _call_progress(callback: Callable, prog: DownloadProgress):
-        """Safely call async or sync progress callback."""
-        try:
-            if asyncio.iscoroutinefunction(callback):
-                await callback(prog)
-            else:
-                callback(prog)
-        except Exception as e:
-            logger.debug(f"Progress callback error: {e}")
-
-    # ── Format spec builder ──────────────────────────────────────────────────
-
-    @staticmethod
-    def build_format_spec(format_id: str, ext: str) -> str:
-        """
-        Build a yt-dlp format selector from a format_id.
-        For audio conversions, returns 'bestaudio/best'.
-        For video without audio (video-only), merges with bestaudio.
-        """
-        if format_id.startswith("bestaudio"):
-            return "bestaudio/best"
-
-        # For video formats that are video-only, merge with best audio
-        # This is handled at call time by checking VideoFormat.has_audio
-        return format_id
-
-
-# Global singleton
-youtube_service = YouTubeService()
-            
+        # ─── THE FIX: Bulletproof format selection ───
+        # تنظيف الجودة المطلوبة لضمان عدم تعطل المكتبة
+        clean_format = format_spec.split("__")
+        if ext in ("mp3", "m4a", "opus") or "audio" in clean_format:
+            safe_format = f"{clean_format}/bestaudio/best"
+        else:
+            # لو الجودة المطلوبة مش متوفرة، هينزل تلقائياً لأفضل جودة متاحة (فيديو وصوت)
+            if "+" not in clean_format and clean_format != "best":
+                safe_format = f"{clean_format}+bestaudio/bestvideo+bestaudio/best"
+            else
+    
