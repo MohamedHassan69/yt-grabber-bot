@@ -1,0 +1,25 @@
+version: "3.9"
+
+services:
+  ytgrabbot:
+    build: .
+    container_name: ytgrabbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - ENVIRONMENT=production
+    volumes:
+      - ./logs:/app/logs
+      - ./tmp:/app/tmp
+    ports:
+      - "${PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  logs:
+  tmp:

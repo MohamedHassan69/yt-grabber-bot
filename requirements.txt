@@ -1,0 +1,16 @@
+# Core
+python-telegram-bot[webhooks]==21.6
+yt-dlp>=2024.11.4
+
+# Environment
+python-dotenv>=1.0.0
+
+# FFmpeg Python bindings (optional, for audio conversion)
+# ffmpeg-python>=0.2.0
+
+# Async HTTP (used by python-telegram-bot)
+httpx>=0.27.0
+aiohttp>=3.10.0
+
+# Utilities
+aiofiles>=24.1.0

@@ -1,0 +1,28 @@
+# Koyeb deployment configuration
+# Deploy via: koyeb app create --file koyeb.yaml
+# Or paste in Koyeb dashboard
+
+name: ytgrabbot
+services:
+  - name: bot
+    type: web
+    git:
+      repository: github.com/YOUR_USERNAME/YOUR_REPO
+      branch: main
+    dockerfile: Dockerfile
+    ports:
+      - port: 8080
+        protocol: http
+    env:
+      - key: BOT_TOKEN
+        value: "YOUR_BOT_TOKEN"   # Set via Koyeb secrets instead
+      - key: WEBHOOK_URL
+        value: ""   # Will be set to your Koyeb service URL
+      - key: PORT
+        value: "8080"
+      - key: ENVIRONMENT
+        value: "production"
+    instance_types: nano   # Free tier
+    scaling:
+      min: 0   # Scale to 0 when idle (manually start/stop)
+      max: 1
