@@ -126,14 +126,6 @@ class DownloadProgress:
 def _ydl_opts_base(quiet: bool = True) -> dict:
     """
     Base yt-dlp options hardened for server/container environments.
-
-    Key additions vs naive defaults:
-      - extractor_args: tells YouTube extractor to skip Android client
-        format checks that fail on headless servers without cookies
-      - format fallback chain: tries progressive mp4, then anything with video+audio,
-        then pure best — never raises "format not available" on a valid video
-      - ignoreerrors=False at info level so we still get exceptions on bad URLs
-      - geo_bypass: helps on some hosting providers with restricted regions
     """
     return {
         "quiet": quiet,
@@ -142,17 +134,12 @@ def _ydl_opts_base(quiet: bool = True) -> dict:
         "socket_timeout": 30,
         "retries": 5,
         "fragment_retries": 5,
-        "http_chunk_size": 10 * 1024 * 1024,   # 10 MB
-        "geo_bypass": True,
-        # Tell yt-dlp to use the web client instead of Android/TV clients
-        # which are more likely to have format restrictions on servers
+        "cookiefile": "app/m.youtube.com_cookies.txt",  # تأكد من المسار ده
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "web_creator", "ios"],
-                "player_skip": ["webpage", "configs"],
             }
         },
-        # Suppress the DownloadError for individual format failures during info fetch
         "ignoreerrors": False,
     }
 
@@ -496,9 +483,9 @@ class YouTubeService:
             if on_progress is None:
                 return
             now = time.monotonic()
-            if now - last_progress_time[0] < 1.5 and d.get("status") == "downloading":
+            if now - last_progress_time < 1.5 and d.get("status") == "downloading":
                 return
-            last_progress_time[0] = now
+            last_progress_time = now
 
             status = d.get("status", "unknown")
             downloaded = d.get("downloaded_bytes", 0) or 0
@@ -565,21 +552,9 @@ class YouTubeService:
 
     @staticmethod
     async def _call_progress(callback: Callable, prog: DownloadProgress) -> None:
-        try:
-            if asyncio.iscoroutinefunction(callback):
-                await callback(prog)
-            else:
-                callback(prog)
-        except Exception as e:
-            logger.debug(f"Progress callback error: {e}")
-
-    @staticmethod
-    def build_format_spec(format_id: str, ext: str) -> str:
-        """Map a format_id from the UI to a real yt-dlp format selector."""
-        if format_id.startswith("bestaudio"):
-            return "bestaudio/best"
-        return format_id
-
-
-# Global singleton
-youtube_service = YouTubeService()
+        """Helper to invoke progress callbacks either asynchronously or synchronously."""
+        if asyncio.iscoroutinefunction(callback):
+            await callback(prog)
+        else:
+            callback(prog)
+      
