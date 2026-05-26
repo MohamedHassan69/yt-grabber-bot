@@ -7,7 +7,6 @@ from pyrogram import Client, types
 from pyrogram.enums import ParseMode
 
 from app.config import settings
-# تم تعديل السطر ده لـ youtube_service (بدون s)
 from app.services.youtube_service import youtube_service
 from app.services.ui_builder import (
     msg_fetching, msg_error, msg_rate_limited, msg_live_not_supported
