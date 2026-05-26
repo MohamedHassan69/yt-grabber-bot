@@ -126,6 +126,7 @@ def _ydl_opts_base(quiet: bool = True) -> dict:
         "retries": 3,
         "fragment_retries": 3,
         "http_chunk_size": 10 * 1024 * 1024,  # 10 MB chunks
+        "cookiefile": "m.youtube.com_cookies.txt",  # تمت إضافة ملف الكوكيز هنا
     }
 
 
@@ -395,9 +396,9 @@ class YouTubeService:
                 return
             now = time.monotonic()
             # Throttle progress callbacks to every 1.5 seconds to avoid Telegram flood
-            if now - last_progress_time[0] < 1.5 and d.get("status") == "downloading":
+            if now - last_progress_time < 1.5 and d.get("status") == "downloading":
                 return
-            last_progress_time[0] = now
+            last_progress_time = now
 
             status = d.get("status", "unknown")
             downloaded = d.get("downloaded_bytes", 0)
@@ -479,3 +480,4 @@ class YouTubeService:
 
 # Global singleton
 youtube_service = YouTubeService()
+            
