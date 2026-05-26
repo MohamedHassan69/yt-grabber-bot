@@ -11,14 +11,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 class Settings:
-    # ── Core ─────────────────────────────────────────────────────────────────
-    BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
+    # ── Core (Userbot Credentials) ───────────────────────────────────────────
+    API_ID: int = int(os.getenv("API_ID", "0"))
+    API_HASH: str = os.getenv("API_HASH", "")
+    SESSION_STRING: str = os.getenv("SESSION_STRING", "")
+    
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "development")
-    PORT: int = int(os.getenv("PORT", "8080"))
-
-    # ── Webhook (leave empty to use polling) ─────────────────────────────────
-    WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
-    WEBHOOK_SECRET: str = os.getenv("WEBHOOK_SECRET", "")
+    PORT: int = int(os.getenv("PORT", "8000"))
 
     # ── Paths ─────────────────────────────────────────────────────────────────
     TMP_DIR: Path = BASE_DIR / "tmp"
@@ -26,8 +25,8 @@ class Settings:
     PERSISTENCE_FILE: str = str(BASE_DIR / "bot_persistence.pkl")
 
     # ── Download limits ───────────────────────────────────────────────────────
-    MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "45"))   # Telegram bot limit is 50 MB
-    MAX_DURATION_SECONDS: int = int(os.getenv("MAX_DURATION_SECONDS", "1800"))  # 30 min
+    MAX_FILE_SIZE_MB: int = int(os.getenv("MAX_FILE_SIZE_MB", "2000"))   # Userbot limit is 2 GB
+    MAX_DURATION_SECONDS: int = int(os.getenv("MAX_DURATION_SECONDS", "10800"))  # 3 hours
     MAX_PLAYLIST_ITEMS: int = int(os.getenv("MAX_PLAYLIST_ITEMS", "50"))
     MAX_CONCURRENT_DOWNLOADS: int = int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "3"))
 
@@ -51,15 +50,9 @@ class Settings:
     # ── Logging ───────────────────────────────────────────────────────────────
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
-    def __post_init__(self):
-        if not self.BOT_TOKEN:
-            raise ValueError("BOT_TOKEN environment variable is required.")
-        self.TMP_DIR.mkdir(parents=True, exist_ok=True)
-        self.LOG_DIR.mkdir(parents=True, exist_ok=True)
-
     def validate(self):
-        if not self.BOT_TOKEN:
-            raise ValueError("BOT_TOKEN is not set. Please check your .env file.")
+        if not self.API_ID or not self.API_HASH or not self.SESSION_STRING:
+            raise ValueError("API_ID, API_HASH, and SESSION_STRING must be set in your environment variables.")
         self.TMP_DIR.mkdir(parents=True, exist_ok=True)
         self.LOG_DIR.mkdir(parents=True, exist_ok=True)
         return self
@@ -67,3 +60,4 @@ class Settings:
 
 settings = Settings()
 settings.validate()
+    
