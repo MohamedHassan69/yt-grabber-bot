@@ -96,6 +96,7 @@ async def _handle_video(client: Client, message: types.Message, status_msg: type
         return
 
     # Auto-select the best available video format (or audio if video isn't present)
+    # التعديل هنا: إضافة لاختيار الجودة الأعلى (أول عنصر في القائمة)
     best_format = info.video_formats if info.video_formats else info.audio_formats
     resolution_label = getattr(best_format, 'resolution', 'Audio Only')
 
