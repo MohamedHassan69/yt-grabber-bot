@@ -172,12 +172,6 @@ def _pick_best_formats(
 ) -> Tuple[List[VideoFormat], List[AudioFormat]]:
     """
     Parse raw yt-dlp format dicts into clean VideoFormat / AudioFormat objects.
-
-    Changes vs original:
-      - No longer skips formats with unknown filesize (filesize is often None
-        on server environments — skipping them left empty format lists)
-      - Still skips formats that have a KNOWN size exceeding the limit
-      - Deduplicates by resolution+ext, preferring: has_audio > higher tbr > mp4
     """
     video_formats: Dict[str, VideoFormat] = {}
     audio_formats: Dict[str, AudioFormat] = {}
@@ -273,17 +267,20 @@ class YouTubeService:
         raw = None
         last_error = None
 
-        # Try with web client first, then fall back to basic options if it fails
+        # Try with multiple combinations to bypass "Requested format is not available"
         for attempt, extra_opts in enumerate([
-            {},   # attempt 1: standard options above
+            {     # attempt 1: accept any format combination
+                "format": "bestvideo+bestaudio/best/bestvideo/bestaudio/all"
+            },
             {     # attempt 2: strip extractor_args, use simpler config
                 "extractor_args": {},
                 "geo_bypass": True,
+                "format": "bestvideo+bestaudio/best/all"
             },
-            {     # attempt 3: absolute minimum — just get something
+            {     # attempt 3: absolute minimum — just get all formats
                 "extractor_args": {},
                 "geo_bypass": False,
-                "format": "best",
+                "format": "all"
             },
         ]):
             try:
@@ -557,6 +554,7 @@ class YouTubeService:
             await callback(prog)
         else:
             callback(prog)
-      # ضيف السطر ده في نهاية الملف خالص بره أي كلاس
-youtube_service = YouTubeService()
 
+# ضيف السطر ده في نهاية الملف خالص بره أي كلاس
+youtube_service = YouTubeService()
+  
