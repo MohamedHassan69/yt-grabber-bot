@@ -557,4 +557,6 @@ class YouTubeService:
             await callback(prog)
         else:
             callback(prog)
-      
+      # ضيف السطر ده في نهاية الملف خالص بره أي كلاس
+youtube_service = YouTubeService()
+
