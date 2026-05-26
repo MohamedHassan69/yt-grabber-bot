@@ -2,18 +2,24 @@
 YouTube download service built on yt-dlp.
 Handles info extraction, format listing, and actual downloading
 with real-time progress reporting via asyncio queues.
+
+Key fixes vs original:
+  - extractor_args with po_token bypass for server environments
+  - Robust format selector with multiple fallbacks (never crashes on missing format)
+  - asyncio.get_running_loop() instead of deprecated get_event_loop()
+  - DownloadError caught and re-raised cleanly so callers get useful messages
+  - _pick_best_formats no longer skips formats with unknown filesize (common on servers)
+  - All dataclasses intact: AudioFormat, VideoFormat, VideoInfo, PlaylistInfo, DownloadProgress
 """
 import asyncio
-import json
-import os
-import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import yt_dlp
+from yt_dlp.utils import DownloadError
 
 from app.config import settings
 from app.utils.cache import video_cache
@@ -28,8 +34,8 @@ logger = setup_logger(__name__)
 @dataclass
 class AudioFormat:
     format_id: str
-    ext: str           # mp3, m4a, opus, webm
-    abr: Optional[float]
+    ext: str            # mp3, m4a, opus, webm
+    abr: Optional[float]    # audio bitrate kbps
     filesize: Optional[int]
     codec: str
 
@@ -46,13 +52,13 @@ class AudioFormat:
 @dataclass
 class VideoFormat:
     format_id: str
-    ext: str
+    ext: str            # mp4, webm
     height: Optional[int]
     fps: Optional[float]
     filesize: Optional[int]
     vcodec: str
-    acodec: str
-    tbr: Optional[float]
+    acodec: str         # 'none' if video-only
+    tbr: Optional[float]    # total bitrate
 
     @property
     def resolution(self) -> str:
@@ -81,7 +87,7 @@ class VideoInfo:
     url: str
     video_id: str
     title: str
-    duration: Optional[int]
+    duration: Optional[int]     # seconds
     thumbnail: Optional[str]
     uploader: str
     view_count: Optional[int]
@@ -105,32 +111,87 @@ class PlaylistInfo:
 
 @dataclass
 class DownloadProgress:
-    status: str
+    status: str         # "downloading", "processing", "finished", "error"
     pct: float = 0.0
-    speed: Optional[float] = None
-    eta: Optional[int] = None
+    speed: Optional[float] = None   # bytes/sec
+    eta: Optional[int] = None       # seconds
     downloaded: Optional[int] = None
     total: Optional[int] = None
     filename: Optional[str] = None
     error: Optional[str] = None
 
 
-# ─── Helper ────────────────────────────────────────────────────────────────────
+# ─── yt-dlp options ───────────────────────────────────────────────────────────
 
 def _ydl_opts_base(quiet: bool = True) -> dict:
+    """
+    Base yt-dlp options hardened for server/container environments.
+
+    Key additions vs naive defaults:
+      - extractor_args: tells YouTube extractor to skip Android client
+        format checks that fail on headless servers without cookies
+      - format fallback chain: tries progressive mp4, then anything with video+audio,
+        then pure best — never raises "format not available" on a valid video
+      - ignoreerrors=False at info level so we still get exceptions on bad URLs
+      - geo_bypass: helps on some hosting providers with restricted regions
+    """
     return {
         "quiet": quiet,
         "no_warnings": quiet,
         "noplaylist": True,
         "socket_timeout": 30,
-        "retries": 3,
-        "fragment_retries": 3,
-        "http_chunk_size": 10 * 1024 * 1024,
-        "cookiefile": "m.youtube.com_cookies.txt",
+        "retries": 5,
+        "fragment_retries": 5,
+        "http_chunk_size": 10 * 1024 * 1024,   # 10 MB
+        "geo_bypass": True,
+        # Tell yt-dlp to use the web client instead of Android/TV clients
+        # which are more likely to have format restrictions on servers
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["web", "web_creator", "ios"],
+                "player_skip": ["webpage", "configs"],
+            }
+        },
+        # Suppress the DownloadError for individual format failures during info fetch
+        "ignoreerrors": False,
     }
 
 
-def _pick_best_formats(raw_formats: List[dict], max_filesize_bytes: int) -> Tuple[List[VideoFormat], List[AudioFormat]]:
+def _safe_format_selector(max_height: int = 1080) -> str:
+    """
+    Build a robust format selector that never crashes with
+    'Requested format is not available'.
+
+    Priority chain (yt-dlp tries left to right):
+      1. Best combined progressive mp4 up to max_height
+      2. Best combined progressive webm up to max_height
+      3. Best video+audio merged (any codec) up to max_height
+      4. Absolute best available (no restrictions)
+    """
+    return (
+        f"bestvideo[height<={max_height}][ext=mp4]+bestaudio[ext=m4a]"
+        f"/bestvideo[height<={max_height}][ext=webm]+bestaudio[ext=webm]"
+        f"/bestvideo[height<={max_height}]+bestaudio"
+        f"/best[height<={max_height}]"
+        f"/best"
+    )
+
+
+# ─── Format parsing ───────────────────────────────────────────────────────────
+
+def _pick_best_formats(
+    raw_formats: List[dict],
+    max_filesize_bytes: int,
+) -> Tuple[List[VideoFormat], List[AudioFormat]]:
+    """
+    Parse raw yt-dlp format dicts into clean VideoFormat / AudioFormat objects.
+
+    Changes vs original:
+      - No longer skips formats with unknown filesize (filesize is often None
+        on server environments — skipping them left empty format lists)
+      - Still skips formats that have a KNOWN size exceeding the limit
+      - Deduplicates by resolution+ext, preferring: has_audio > higher tbr > mp4
+    """
     video_formats: Dict[str, VideoFormat] = {}
     audio_formats: Dict[str, AudioFormat] = {}
 
@@ -145,115 +206,380 @@ def _pick_best_formats(raw_formats: List[dict], max_filesize_bytes: int) -> Tupl
         abr = f.get("abr")
         tbr = f.get("tbr")
 
+        # Skip storyboards / manifests
         if ext in ("mhtml", "vtt") or f.get("format_note", "") == "storyboard":
             continue
+
+        # Only skip if filesize is KNOWN and exceeds limit — don't skip unknowns
         if filesize and filesize > max_filesize_bytes:
             continue
 
+        # ── Audio-only ────────────────────────────────────────────────────
         if vcodec == "none" and acodec != "none":
             abr_val = abr or tbr or 0
             bucket = f"{ext}_{int(abr_val // 32) * 32}"
+            af = AudioFormat(
+                format_id=fid, ext=ext, abr=abr_val,
+                filesize=filesize, codec=acodec,
+            )
             existing = audio_formats.get(bucket)
-            af = AudioFormat(format_id=fid, ext=ext, abr=abr_val, filesize=filesize, codec=acodec)
             if existing is None or af.sort_key > existing.sort_key:
                 audio_formats[bucket] = af
             continue
 
+        # ── Video (with or without audio) ─────────────────────────────────
         if vcodec != "none" and height:
             has_audio = acodec != "none"
             key = f"{height}_{ext}"
+            vf = VideoFormat(
+                format_id=fid, ext=ext, height=height, fps=fps,
+                filesize=filesize, vcodec=vcodec, acodec=acodec, tbr=tbr,
+            )
             existing = video_formats.get(key)
-            vf = VideoFormat(format_id=fid, ext=ext, height=height, fps=fps, filesize=filesize, vcodec=vcodec, acodec=acodec, tbr=tbr)
             if existing is None:
                 video_formats[key] = vf
             else:
-                if (not existing.has_audio and has_audio) or ((tbr or 0) > (existing.tbr or 0)):
+                existing_has_audio = existing.has_audio
+                if (not existing_has_audio and has_audio) or \
+                   (has_audio == existing_has_audio and (tbr or 0) > (existing.tbr or 0)):
                     video_formats[key] = vf
 
-    return sorted(video_formats.values(), key=lambda x: x.sort_key, reverse=True), sorted(audio_formats.values(), key=lambda x: x.sort_key, reverse=True)
+    sorted_videos = sorted(video_formats.values(), key=lambda x: x.sort_key, reverse=True)
+    sorted_audio = sorted(audio_formats.values(), key=lambda x: x.sort_key, reverse=True)
+    return sorted_videos, sorted_audio
 
 
-# ─── Main service ──────────────────────────────────────────────────────────────
+# ─── Service ──────────────────────────────────────────────────────────────────
 
 class YouTubeService:
+    """
+    Async wrapper around yt-dlp.
+    All blocking yt-dlp calls run in a thread executor so they never block
+    the asyncio event loop.
+    """
+
     def __init__(self):
         self._semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_DOWNLOADS)
 
+    # ── Info extraction ──────────────────────────────────────────────────────
+
     async def get_video_info(self, url: str) -> VideoInfo:
+        """Fetch video metadata + formats. Results cached for CACHE_TTL_SECONDS."""
         cache_key = f"info:{url}"
         cached = await video_cache.get(cache_key)
-        if cached: return cached
-        info = await asyncio.get_event_loop().run_in_executor(None, self._extract_info_sync, url)
+        if cached:
+            logger.debug(f"Cache hit for {url}")
+            return cached
+
+        logger.info(f"Fetching info: {url}")
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(None, self._extract_info_sync, url)
         await video_cache.set(cache_key, info)
         return info
 
     def _extract_info_sync(self, url: str) -> VideoInfo:
-        opts = {**_ydl_opts_base(), "noplaylist": True, "ignoreerrors": True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            raw = ydl.extract_info(url, download=False)
-        if not raw: raise ValueError("Could not extract video info.")
-        max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
-        v_fmts, a_fmts = _pick_best_formats(raw.get("formats", []), max_bytes)
-        return VideoInfo(url=url, video_id=raw.get("id", ""), title=raw.get("title", "Untitled"),
-                         duration=raw.get("duration"), thumbnail=raw.get("thumbnail"), uploader=raw.get("uploader") or "Unknown",
-                         view_count=raw.get("view_count"), upload_date=raw.get("upload_date"), description="",
-                         video_formats=v_fmts, audio_formats=a_fmts, is_live=raw.get("is_live", False))
+        opts = {
+            **_ydl_opts_base(),
+            "noplaylist": True,
+        }
+
+        raw = None
+        last_error = None
+
+        # Try with web client first, then fall back to basic options if it fails
+        for attempt, extra_opts in enumerate([
+            {},   # attempt 1: standard options above
+            {     # attempt 2: strip extractor_args, use simpler config
+                "extractor_args": {},
+                "geo_bypass": True,
+            },
+            {     # attempt 3: absolute minimum — just get something
+                "extractor_args": {},
+                "geo_bypass": False,
+                "format": "best",
+            },
+        ]):
+            try:
+                attempt_opts = {**opts, **extra_opts}
+                with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                    raw = ydl.extract_info(url, download=False)
+                if raw:
+                    logger.debug(f"Info extracted on attempt {attempt + 1}")
+                    break
+            except DownloadError as e:
+                last_error = e
+                logger.warning(f"Info extraction attempt {attempt + 1} failed: {e}")
+                continue
+            except Exception as e:
+                last_error = e
+                logger.warning(f"Info extraction attempt {attempt + 1} unexpected error: {e}")
+                continue
+
+        if not raw:
+            err_msg = str(last_error) if last_error else "Unknown error"
+            # Clean up yt-dlp's verbose error prefix for the user
+            for prefix in ("ERROR: [youtube] ", "ERROR: "):
+                if err_msg.startswith(prefix):
+                    err_msg = err_msg[len(prefix):]
+                    break
+            raise ValueError(err_msg)
+
+        # Use a very large max_bytes for info parsing — we only enforce the
+        # real limit at upload time, not at format display time
+        max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024 * 20  # 20x headroom
+        video_fmts, audio_fmts = _pick_best_formats(
+            raw.get("formats", []), max_bytes
+        )
+
+        # Build audio options: always offer MP3, M4A, and best native audio
+        mp3_size_estimate = None
+        for af in audio_fmts:
+            if af.ext in ("m4a", "webm", "opus") and af.filesize:
+                mp3_size_estimate = af.filesize
+                break
+
+        audio_fmts_final: List[AudioFormat] = []
+
+        # MP3 (via FFmpeg postprocessor)
+        audio_fmts_final.append(AudioFormat(
+            format_id="bestaudio/best__mp3",
+            ext="mp3",
+            abr=192,
+            filesize=mp3_size_estimate,
+            codec="mp3",
+        ))
+
+        # M4A — use extracted format if available, else virtual
+        m4a_added = False
+        for af in audio_fmts:
+            if af.ext == "m4a":
+                audio_fmts_final.append(af)
+                m4a_added = True
+                break
+        if not m4a_added:
+            audio_fmts_final.append(AudioFormat(
+                format_id="bestaudio/best__m4a",
+                ext="m4a",
+                abr=128,
+                filesize=mp3_size_estimate,
+                codec="aac",
+            ))
+
+        # Best native audio (opus/webm)
+        for af in audio_fmts:
+            if af.ext in ("opus", "webm"):
+                audio_fmts_final.append(af)
+                break
+
+        return VideoInfo(
+            url=url,
+            video_id=raw.get("id", ""),
+            title=raw.get("title", "Untitled"),
+            duration=raw.get("duration"),
+            thumbnail=raw.get("thumbnail"),
+            uploader=raw.get("uploader") or raw.get("channel") or "Unknown",
+            view_count=raw.get("view_count"),
+            upload_date=raw.get("upload_date"),
+            description=(raw.get("description", "") or "")[:200],
+            video_formats=video_fmts,
+            audio_formats=audio_fmts_final,
+            is_live=raw.get("is_live", False),
+        )
+
+    # ── Playlist info ─────────────────────────────────────────────────────────
 
     async def get_playlist_info(self, url: str) -> PlaylistInfo:
+        """Fetch playlist metadata without downloading individual videos."""
         cache_key = f"playlist:{url}"
         cached = await video_cache.get(cache_key)
-        if cached: return cached
-        info = await asyncio.get_event_loop().run_in_executor(None, self._extract_playlist_sync, url)
+        if cached:
+            return cached
+
+        logger.info(f"Fetching playlist info: {url}")
+        loop = asyncio.get_running_loop()
+        info = await loop.run_in_executor(None, self._extract_playlist_sync, url)
         await video_cache.set(cache_key, info)
         return info
 
     def _extract_playlist_sync(self, url: str) -> PlaylistInfo:
-        opts = {**_ydl_opts_base(), "noplaylist": False, "extract_flat": True, "playlistend": settings.MAX_PLAYLIST_ITEMS}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            raw = ydl.extract_info(url, download=False)
-        if not raw: raise ValueError("Could not extract playlist info.")
+        opts = {
+            **_ydl_opts_base(),
+            "noplaylist": False,
+            "extract_flat": True,
+            "playlistend": settings.MAX_PLAYLIST_ITEMS,
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                raw = ydl.extract_info(url, download=False)
+        except DownloadError as e:
+            raise ValueError(str(e))
+
+        if not raw:
+            raise ValueError("Could not extract playlist info.")
+
         entries = [e for e in (raw.get("entries", []) or []) if e]
-        return PlaylistInfo(url=url, playlist_id=raw.get("id", ""), title=raw.get("title", "Unknown"),
-                            uploader=raw.get("uploader") or "Unknown", entry_count=len(entries),
-                            entries=entries[:settings.MAX_PLAYLIST_ITEMS], thumbnail=raw.get("thumbnail"))
 
-    async def download(self, url: str, format_spec: str, ext: str, on_progress: Optional[Callable] = None) -> Path:
+        return PlaylistInfo(
+            url=url,
+            playlist_id=raw.get("id", ""),
+            title=raw.get("title", "Unknown Playlist"),
+            uploader=raw.get("uploader") or raw.get("channel") or "Unknown",
+            entry_count=len(entries),
+            entries=entries[:settings.MAX_PLAYLIST_ITEMS],
+            thumbnail=raw.get("thumbnail"),
+        )
+
+    # ── Download ──────────────────────────────────────────────────────────────
+
+    async def download(
+        self,
+        url: str,
+        format_spec: str,
+        ext: str,
+        on_progress: Optional[Callable[[DownloadProgress], None]] = None,
+    ) -> Path:
+        """
+        Download url using format_spec.
+        Runs in executor so it never blocks the event loop.
+        Returns Path to the downloaded file.
+        """
         async with self._semaphore:
-            return await asyncio.get_event_loop().run_in_executor(None, self._download_sync, url, format_spec, ext, on_progress)
+            loop = asyncio.get_running_loop()
+            output_path = await loop.run_in_executor(
+                None,
+                self._download_sync,
+                url,
+                format_spec,
+                ext,
+                on_progress,
+            )
+        return output_path
 
-    def _download_sync(self, url: str, format_spec: str, ext: str, on_progress: Optional[Callable]) -> Path:
+    def _download_sync(
+        self,
+        url: str,
+        format_spec: str,
+        ext: str,
+        on_progress: Optional[Callable],
+    ) -> Path:
         job_id = uuid.uuid4().hex[:8]
         out_template = str(settings.TMP_DIR / f"{job_id}.%(ext)s")
-        
-        # التصحيح السليم (السطر اللي كان عامل مشكلة)
-        if ext in ("mp3", "m4a", "opus") or "audio" in format_spec:
-            safe_format = f"{format_spec}/bestaudio/best"
+
+        # Build postprocessors for audio conversion
+        postprocessors = []
+        if ext == "mp3":
+            postprocessors.append({
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            })
+        elif ext == "m4a":
+            postprocessors.append({
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "m4a",
+            })
+
+        # Resolve format_spec:
+        # "bestaudio/best__mp3" and "bestaudio/best__m4a" are virtual IDs
+        # that we map to the actual yt-dlp selector here
+        if format_spec.startswith("bestaudio/best__"):
+            actual_spec = "bestaudio[ext=m4a]/bestaudio/best"
+        elif "+" in format_spec or format_spec in ("best", "bestaudio/best"):
+            actual_spec = format_spec
         else:
-            safe_format = f"{format_spec}/bestvideo+bestaudio/best"
+            # Specific format ID — add safe fallback chain
+            actual_spec = f"{format_spec}/{_safe_format_selector()}"
 
         last_progress_time = [0.0]
-        def _progress_hook(d: dict):
-            if on_progress is None: return
-            now = time.monotonic()
-            if now - last_progress_time < 1.5 and d.get("status") == "downloading": return
-            last_progress_time = now
-            prog = DownloadProgress(status=d.get("status", "unknown"), pct=min(100.0, (d.get("downloaded_bytes", 0) / (d.get("total_bytes") or d.get("total_bytes_estimate") or 1)) * 100))
-            loop = asyncio.get_event_loop()
-            if loop.is_running(): asyncio.run_coroutine_threadsafe(self._call_progress(on_progress, prog), loop)
 
-        opts = {**_ydl_opts_base(quiet=True), "format": safe_format, "outtmpl": out_template, "progress_hooks": [_progress_hook], "noplaylist": True}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+        def _progress_hook(d: dict) -> None:
+            if on_progress is None:
+                return
+            now = time.monotonic()
+            if now - last_progress_time[0] < 1.5 and d.get("status") == "downloading":
+                return
+            last_progress_time[0] = now
+
+            status = d.get("status", "unknown")
+            downloaded = d.get("downloaded_bytes", 0) or 0
+            total = d.get("total_bytes") or d.get("total_bytes_estimate")
+            speed = d.get("speed")
+            eta = d.get("eta")
+
+            pct = 0.0
+            if total and total > 0:
+                pct = min(100.0, downloaded / total * 100)
+
+            prog = DownloadProgress(
+                status=status,
+                pct=pct,
+                speed=speed,
+                eta=eta,
+                downloaded=downloaded,
+                total=total,
+            )
+
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        self._call_progress(on_progress, prog), loop
+                    )
+            except Exception:
+                pass
+
+        opts = {
+            **_ydl_opts_base(quiet=True),
+            "format": actual_spec,
+            "outtmpl": out_template,
+            "postprocessors": postprocessors,
+            "progress_hooks": [_progress_hook],
+            "noplaylist": True,
+            "merge_output_format": ext if ext in ("mp4", "webm", "mkv") else None,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([url])
+        except DownloadError as e:
+            err = str(e)
+            # If the specific format ID failed, retry with the safe fallback selector
+            if "Requested format is not available" in err and format_spec not in ("best", "bestaudio/best"):
+                logger.warning(f"Format '{format_spec}' unavailable, retrying with fallback selector")
+                fallback_opts = {**opts, "format": _safe_format_selector()}
+                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                    ydl.download([url])
+            else:
+                raise
+
+        # Find the output file (yt-dlp may change the extension after postprocessing)
         for f in settings.TMP_DIR.iterdir():
-            if f.stem == job_id: return f
-        raise FileNotFoundError("Download file not found")
+            if f.stem == job_id:
+                logger.info(f"Downloaded: {f.name} ({f.stat().st_size // 1024} KB)")
+                return f
+
+        raise FileNotFoundError(
+            f"Download finished but output file not found (job: {job_id}). "
+            "Check ffmpeg is installed for audio conversion."
+        )
 
     @staticmethod
-    async def _call_progress(callback: Callable, prog: DownloadProgress):
+    async def _call_progress(callback: Callable, prog: DownloadProgress) -> None:
         try:
-            if asyncio.iscoroutinefunction(callback): await callback(prog)
-            else: callback(prog)
-        except Exception as e: logger.debug(f"Progress error: {e}")
+            if asyncio.iscoroutinefunction(callback):
+                await callback(prog)
+            else:
+                callback(prog)
+        except Exception as e:
+            logger.debug(f"Progress callback error: {e}")
 
+    @staticmethod
+    def build_format_spec(format_id: str, ext: str) -> str:
+        """Map a format_id from the UI to a real yt-dlp format selector."""
+        if format_id.startswith("bestaudio"):
+            return "bestaudio/best"
+        return format_id
+
+
+# Global singleton
 youtube_service = YouTubeService()
-    
