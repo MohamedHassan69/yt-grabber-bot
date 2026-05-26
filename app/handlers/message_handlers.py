@@ -96,9 +96,25 @@ async def _handle_video(client: Client, message: types.Message, status_msg: type
         return
 
     # Auto-select the best available video format (or audio if video isn't present)
-    # التعديل هنا: إضافة لاختيار الجودة الأعلى (أول عنصر في القائمة)
-    best_format = info.video_formats if info.video_formats else info.audio_formats
-    resolution_label = getattr(best_format, 'resolution', 'Audio Only')
+    formats_list = info.video_formats if info.video_formats else info.audio_formats
+    
+    # حماية إضافية: فك أي قوائم متداخلة للوصول للكائن المطلوب
+    best_format = formats_list
+    while isinstance(best_format, list) or isinstance(best_format, tuple):
+        if len(best_format) > 0:
+            best_format = best_format
+        else:
+            break
+            
+    # استخراج المتغيرات بأمان تام (سواء كانت Object أو Dict)
+    if isinstance(best_format, dict):
+        fmt_id = best_format.get("format_id", "best")
+        fmt_ext = best_format.get("ext", "mp4")
+        resolution_label = best_format.get("resolution", "Audio Only")
+    else:
+        fmt_id = getattr(best_format, 'format_id', 'best')
+        fmt_ext = getattr(best_format, 'ext', 'mp4')
+        resolution_label = getattr(best_format, 'resolution', 'Audio Only')
 
     await status_msg.edit_text(
         f"⏳ **جاري التحميل بأعلى جودة:**\n`{info.title}`\n\n_يرجى الانتظار، قد يستغرق الأمر بعض الوقت للأحجام الكبيرة..._",
@@ -116,8 +132,8 @@ async def _handle_video(client: Client, message: types.Message, status_msg: type
     # Download the file
     file_path = await youtube_service.download(
         url=url,
-        format_spec=best_format.format_id,
-        ext=best_format.ext,
+        format_spec=fmt_id,
+        ext=fmt_ext,
         on_progress=progress_callback
     )
 
