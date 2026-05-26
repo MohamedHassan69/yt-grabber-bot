@@ -7,7 +7,8 @@ from pyrogram import Client, types
 from pyrogram.enums import ParseMode
 
 from app.config import settings
-from app.services.youtube_services import youtube_service
+# تم تعديل السطر ده لـ youtube_service (بدون s)
+from app.services.youtube_service import youtube_service
 from app.services.ui_builder import (
     msg_fetching, msg_error, msg_rate_limited, msg_live_not_supported
 )
@@ -168,4 +169,4 @@ async def _handle_playlist(client: Client, message: types.Message, status_msg: t
             await msg.edit_text(f"❌ **فشل تحميل فيديو {idx}:**\n`{str(e)[:100]}`")
             
     await message.reply_text(f"✅ **تم الانتهاء من قائمة التشغيل:**\n`{info.title}`")
-        
+    
