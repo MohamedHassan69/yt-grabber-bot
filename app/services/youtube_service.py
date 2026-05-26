@@ -14,6 +14,7 @@ Key fixes vs original:
 import asyncio
 import time
 import uuid
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -127,16 +128,27 @@ def _ydl_opts_base(quiet: bool = True) -> dict:
     """
     Base yt-dlp options hardened for server/container environments.
     """
-    import os
-    cookie_path = os.path.join(os.getcwd(), "m.youtube.com_cookies.txt")
+    possible_paths = [
+        "m.youtube.com_cookies.txt",
+        "app/m.youtube.com_cookies.txt",
+        "/app/m.youtube.com_cookies.txt",
+        "/app/app/m.youtube.com_cookies.txt",
+        "cookies.txt"
+    ]
     
+    cookie_path = None
+    for p in possible_paths:
+        if os.path.exists(p):
+            cookie_path = p
+            break
+            
     opts = {
         "quiet": quiet,
         "no_warnings": quiet,
         "noplaylist": True,
-        "socket_timeout": 15,  # لو يوتيوب ماردش في 15 ثانية يفصل
-        "retries": 0,          # منع المحاولات المتكررة عشان السيرفر ميعلقش
-        "fragment_retries": 0,
+        "socket_timeout": 15,
+        "retries": 3,
+        "fragment_retries": 3,
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "web_creator", "ios"],
@@ -145,8 +157,7 @@ def _ydl_opts_base(quiet: bool = True) -> dict:
         "ignoreerrors": False,
     }
     
-    # يضيف الكوكيز بس لو الملف موجود فعلاً
-    if os.path.exists(cookie_path):
+    if cookie_path:
         opts["cookiefile"] = cookie_path
         
     return opts
@@ -565,4 +576,4 @@ class YouTubeService:
 
 # ضيف السطر ده في نهاية الملف خالص بره أي كلاس
 youtube_service = YouTubeService()
-      
+  
