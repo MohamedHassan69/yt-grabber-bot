@@ -127,14 +127,16 @@ def _ydl_opts_base(quiet: bool = True) -> dict:
     """
     Base yt-dlp options hardened for server/container environments.
     """
-    return {
+    import os
+    cookie_path = os.path.join(os.getcwd(), "m.youtube.com_cookies.txt")
+    
+    opts = {
         "quiet": quiet,
         "no_warnings": quiet,
         "noplaylist": True,
-        "socket_timeout": 30,
-        "retries": 5,
-        "fragment_retries": 5,
-        "cookiefile": "app/m.youtube.com_cookies.txt",  # تأكد من المسار ده
+        "socket_timeout": 15,  # لو يوتيوب ماردش في 15 ثانية يفصل
+        "retries": 0,          # منع المحاولات المتكررة عشان السيرفر ميعلقش
+        "fragment_retries": 0,
         "extractor_args": {
             "youtube": {
                 "player_client": ["web", "web_creator", "ios"],
@@ -142,6 +144,12 @@ def _ydl_opts_base(quiet: bool = True) -> dict:
         },
         "ignoreerrors": False,
     }
+    
+    # يضيف الكوكيز بس لو الملف موجود فعلاً
+    if os.path.exists(cookie_path):
+        opts["cookiefile"] = cookie_path
+        
+    return opts
 
 
 def _safe_format_selector(max_height: int = 1080) -> str:
@@ -557,4 +565,4 @@ class YouTubeService:
 
 # ضيف السطر ده في نهاية الملف خالص بره أي كلاس
 youtube_service = YouTubeService()
-  
+      
