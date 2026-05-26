@@ -4,7 +4,6 @@ Constructs message templates adapted for Pyrogram Userbot.
 """
 from typing import Optional
 
-# تم تعديل السطر ده لـ youtube_service (بدون s)
 from app.services.youtube_service import VideoInfo, PlaylistInfo, VideoFormat, AudioFormat
 from app.utils.formatters import format_duration, format_size, truncate, format_progress_bar
 from app.utils.logger import setup_logger
