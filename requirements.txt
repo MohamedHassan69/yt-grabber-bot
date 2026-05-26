@@ -3,7 +3,7 @@ pyrogram>=2.0.106
 TgCrypto>=1.2.5
 
 # YouTube Downloader
-yt-dlp>=2024.11.4
+yt-dlp
 
 # Environment
 python-dotenv>=1.0.0
